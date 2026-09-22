@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>光衰校正室</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>光衰校正室</h1>
+      <p>背景、曝光、漂白分层校正；断点不拼接绝对强度。</p>
+    </div>
+    <div class="actions">
+      <button id="replay">清空并重放 fixture</button>
+      <button id="import">仅重新导入</button>
+      <button id="clear">清空数据库</button>
+      <a class="button" href="/api/export">导出运行记录</a>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel form-panel">
+      <h2>模型分支</h2>
+      <form id="run-form">
+        <label>名称 <input name="name" required value="S1-额外分支"></label>
+        <label>模型
+          <select name="model">
+            <option value="single">单指数</option>
+            <option value="double">双指数</option>
+            <option value="monotone">单调非参数</option>
+          </select>
+        </label>
+        <label>采集段 <select name="segment_id" id="segment-select"></select></label>
+        <label>拟合首帧 <input name="fit_start" type="number" value="9" required></label>
+        <label>拟合末帧 <input name="fit_end" type="number" value="13" required></label>
+        <label>因子下限 <input name="factor_floor" type="number" step="0.01" value="0.20" min="0.01" max="1"></label>
+        <button>保留此分支</button>
+      </form>
+      <p class="hint">事件区间由 fixture 自动排除；窗口包含暂停、重对焦或 ROI 变更后的首帧会被拒绝。</p>
+      <div id="form-error" class="error" role="alert"></div>
+    </section>
+
+    <section class="panel">
+      <h2>采集断点</h2>
+      <div id="breakpoints" class="chips"></div>
+      <h2>生物事件（不参与拟合）</h2>
+      <div id="event-chips" class="chips"></div>
+    </section>
+
+    <section class="panel wide">
+      <h2>同段分支稳定性比较</h2>
+      <div class="table-wrap">
+        <table id="compare-table">
+          <thead><tr><th>#</th><th>名称</th><th>模型</th><th>拟合窗</th><th>拟合 RMSE</th><th>事件 RMSE</th><th>外推增益</th><th>稳定分</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel wide">
+      <h2>六层中间量（原值 / 背景修正 / 曝光归一 / 漂白因子 / 最终值 / 残差）</h2>
+      <div id="warnings" class="warnings"></div>
+      <canvas id="chart" width="1180" height="420"></canvas>
+      <div class="legend" aria-label="图例">
+        <span style="--c:#64748b">原值</span>
+        <span style="--c:#0ea5e9">背景修正</span>
+        <span style="--c:#a855f7">曝光归一</span>
+        <span style="--c:#f59e0b">漂白因子</span>
+        <span style="--c:#22c55e">最终序列</span>
+        <span style="--c:#ef4444">残差</span>
+        <span style="--c:#111827">× 不可归一/段外</span>
+      </div>
+    </section>
+
+    <section class="panel wide">
+      <h2>逐帧可解释记录</h2>
+      <div class="table-wrap tall">
+        <table id="frames-table">
+          <thead>
+            <tr><th>帧</th><th>段/ROI</th><th>原值</th><th>背景</th><th>曝光</th><th>背景修正</th><th>曝光归一</th><th>漂白因子</th><th>噪声增益</th><th>最终值</th><th>残差</th><th>状态</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

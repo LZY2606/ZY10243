@@ -1,0 +1,4 @@
+break_id,kind,after_frame,from_segment,to_segment,from_roi,to_roi
+B1,pause,7,S0,S1,ROI-A,ROI-B
+B2,refocus,15,S1,S2,ROI-B,ROI-C
+B3,roi_change,15,S1,S2,ROI-B,ROI-C

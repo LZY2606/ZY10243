@@ -26,6 +26,8 @@ Pods/
 .env
 .env.*
 *.log
+*.sqlite3
+*.sqlite3-journal
 coverage/
 .coverage
 .nyc_output/
