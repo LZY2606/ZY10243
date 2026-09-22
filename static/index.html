@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>光衰校正室</title>
+<style>
+  :root { --bg:#0f1420; --panel:#1a2233; --line:#2b3a55; --fg:#dfe7f5;
+          --dim:#8fa0bd; --accent:#4fc3f7; --warn:#ffb74d; --bad:#ef5350; --ok:#81c784; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:14px/1.5 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif; }
+  header { padding:14px 20px; border-bottom:1px solid var(--line);
+           display:flex; align-items:baseline; gap:14px; }
+  header h1 { font-size:20px; margin:0; color:var(--accent); }
+  header span { color:var(--dim); font-size:12px; }
+  main { display:grid; grid-template-columns:300px 1fr; gap:14px; padding:14px 20px; }
+  .panel { background:var(--panel); border:1px solid var(--line);
+           border-radius:8px; padding:12px 14px; margin-bottom:14px; }
+  .panel h2 { font-size:14px; margin:0 0 10px; color:var(--accent); }
+  button { background:#25406b; color:var(--fg); border:1px solid var(--line);
+           border-radius:6px; padding:6px 12px; cursor:pointer; margin:2px 4px 2px 0; }
+  button:hover { background:#2f5290; }
+  button.danger { background:#5b2a2a; }
+  select,input { background:#0d1320; color:var(--fg); border:1px solid var(--line);
+                 border-radius:4px; padding:4px 6px; width:100%; margin:2px 0 8px; }
+  label { font-size:12px; color:var(--dim); }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th,td { border-bottom:1px solid var(--line); padding:4px 6px; text-align:left; }
+  th { color:var(--dim); font-weight:normal; }
+  canvas { width:100%; background:#0d1320; border-radius:6px; }
+  .tag { display:inline-block; padding:1px 6px; border-radius:4px; font-size:11px;
+         background:#26334e; margin-right:4px; }
+  .tag.warn { background:#5a4416; color:var(--warn); }
+  .tag.bad { background:#5b2a2a; color:var(--bad); }
+  .tag.ok { background:#274a2c; color:var(--ok); }
+  .layers label { display:inline-block; margin-right:10px; cursor:pointer; }
+  #msg { font-size:12px; color:var(--warn); min-height:18px; }
+  .mono { font-family:ui-monospace,Menlo,monospace; font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>光衰校正室</h1>
+  <span>背景修正 · 曝光归一 · 漂白因子 · 逐层可解释中间量 · 断点分段独立归一</span>
+</header>
+<main>
+  <div>
+    <div class="panel">
+      <h2>数据集</h2>
+      <button onclick="importFixture()">导入固定 fixture</button>
+      <button onclick="resetDb()" class="danger">清空数据库</button>
+      <button onclick="exportRuns()">导出运行记录</button>
+      <div id="datasets" style="margin-top:8px"></div>
+    </div>
+    <div class="panel">
+      <h2>新建模型分支</h2>
+      <label>模型类型</label>
+      <select id="mtype">
+        <option value="single_exp">单指数衰减</option>
+        <option value="double_exp">双指数衰减</option>
+        <option value="monotone">单调非参数（等渗）</option>
+      </select>
+      <label>拟合窗起 / 止（不得跨断点）</label>
+      <input id="fstart" type="number" value="0">
+      <input id="fend" type="number" value="69">
+      <label>生物事件排除区间（如 48-52，多个用逗号分隔）</label>
+      <input id="events" value="48-52">
+      <label>漂白因子噪声放大上限 noise_cap</label>
+      <input id="ncap" type="number" step="0.05" value="0.2">
+      <button onclick="fitModel()">拟合并保存分支</button>
+      <div id="msg"></div>
+    </div>
+    <div class="panel">
+      <h2>分支对比（外推稳定性）</h2>
+      <div id="compare"><span class="tag">尚未拟合</span></div>
+    </div>
+  </div>
+  <div>
+    <div class="panel">
+      <h2>逐层序列 <span id="mtitle" class="mono"></span></h2>
+      <div class="layers" id="layerChecks"></div>
+      <canvas id="chart" width="900" height="380"></canvas>
+    </div>
+    <div class="panel">
+      <h2>诊断</h2>
+      <div id="diag"><span class="tag">选择模型分支后显示</span></div>
+    </div>
+    <div class="panel">
+      <h2>模型分支</h2>
+      <div id="models"></div>
+    </div>
+  </div>
+</main>
+<script>
+const LAYERS = [
+  ["raw","原始值","#546e9e"], ["bg_corrected","背景修正","#9575cd"],
+  ["exp_norm","曝光归一","#4fc3f7"], ["bleach_factor","漂白因子","#ffb74d"],
+  ["corrected","最终序列","#81c784"], ["residual","残差","#ef5350"],
+];
+let datasets=[], curDs=null, curModel=null, modelDetail=null;
+const visible={raw:false,bg_corrected:false,exp_norm:true,bleach_factor:true,corrected:true,residual:false};
+
+function layerCheckboxes(){
+  document.getElementById("layerChecks").innerHTML = LAYERS.map(([k,label,color])=>
+    `<label><input type="checkbox" ${visible[k]?"checked":""} style="width:auto"
+      onchange="visible['${k}']=this.checked;draw()"
+      > <span style="color:${color}">■</span> ${label}</label>`).join("");
+}
+async function api(path, opts){
+  const r = await fetch(path, opts);
+  const j = await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(j.detail || r.statusText);
+  return j;
+}
+function msg(t){ document.getElementById("msg").textContent = t||""; }
+
+async function refresh(){
+  datasets = await api("/api/datasets");
+  const el = document.getElementById("datasets");
+  if(!datasets.length){ el.innerHTML='<span class="tag">空库，请导入 fixture</span>'; return; }
+  el.innerHTML = datasets.map(d=>
+    `<div style="margin:4px 0"><a href="#" style="color:var(--accent)"
+      onclick="selectDs(${d.id});return false">#${d.id} ${d.name}</a>
+      <div class="mono" style="color:var(--dim)">${d.n_frames}帧 · ${d.n_breakpoints}断点 · ${d.n_models}分支</div></div>`
+  ).join("");
+  if(!curDs && datasets.length) selectDs(datasets[datasets.length-1].id);
+}
+async function selectDs(id){
+  curDs = await api("/api/datasets/"+id);
+  const bp = curDs.breakpoints.map(b=>`t=${b.t} ${b.type}`).join("；")||"无";
+  msg(""); document.getElementById("diag").innerHTML =
+    `<div><span class="tag">断点</span>${bp}</div>`;
+  await refreshModels();
+}
+async function importFixture(){
+  const r = await api("/api/import-fixture",{method:"POST"});
+  msg(`已导入数据集 #${r.dataset_id}`); await refresh();
+}
+async function resetDb(){
+  if(!confirm("确认清空数据库？（运行记录保留）")) return;
+  await api("/api/reset",{method:"POST"});
+  curDs=null; curModel=null; modelDetail=null;
+  document.getElementById("models").innerHTML="";
+  document.getElementById("compare").innerHTML="";
+  draw(); await refresh();
+}
+async function exportRuns(){
+  const j = await api("/api/runs/export");
+  const blob = new Blob([JSON.stringify(j,null,2)],{type:"application/json"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = "runs_export.json"; a.click();
+}
+function parseEvents(){
+  const s = document.getElementById("events").value.trim();
+  if(!s) return [];
+  return s.split(",").map(p=>{const[a,b]=p.split("-").map(Number);return[a,b];});
+}
+async function fitModel(){
+  if(!curDs){ msg("请先选择数据集"); return; }
+  try{
+    const body = {model_type:document.getElementById("mtype").value,
+      fit_start:+document.getElementById("fstart").value,
+      fit_end:+document.getElementById("fend").value,
+      exclude_events:parseEvents(),
+      noise_cap:+document.getElementById("ncap").value};
+    const r = await api(`/api/datasets/${curDs.id}/models`,
+      {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    msg(`分支 #${r.model_id} 拟合成功（段 ${r.segment}）`);
+    await refreshModels(); await showModel(r.model_id);
+  }catch(e){ msg("拟合被拒绝："+e.message); }
+}
+async function refreshModels(){
+  if(!curDs) return;
+  const cmp = await api(`/api/datasets/${curDs.id}/compare`).catch(()=>null);
+  const mEl = document.getElementById("models");
+  if(!cmp){ mEl.innerHTML='<span class="tag">暂无分支</span>';
+    document.getElementById("compare").innerHTML='<span class="tag">暂无分支</span>'; return; }
+  mEl.innerHTML = "<table><tr><th>ID</th><th>类型</th><th>拟合窗</th><th></th></tr>"+
+    cmp.branches.map(b=>`<tr><td>#${b.model_id}</td><td>${b.model_type}</td>
+      <td class="mono">${b.fit_window[0]}-${b.fit_window[1]}</td>
+      <td><a href="#" style="color:var(--accent)"
+        onclick="showModel(${b.model_id});return false">查看</a></td></tr>`).join("")+"</table>";
+  document.getElementById("compare").innerHTML =
+    "<table><tr><th>排名</th><th>分支</th><th>类型</th><th>外推相对差</th><th>噪声放大帧</th></tr>"+
+    cmp.branches.map(b=>`<tr><td>${b.rank}</td><td>#${b.model_id}</td>
+      <td>${b.model_type}</td>
+      <td class="mono">${b.relative_diff==null?"n/a":(b.relative_diff*100).toFixed(2)+"%"}</td>
+      <td>${b.noise_affected?`<span class="tag bad">${b.noise_affected}</span>`:'<span class="tag ok">0</span>'}</td>
+      </tr>`).join("")+"</table>";
+}
+async function showModel(mid){
+  modelDetail = await api("/api/models/"+mid);
+  curModel = mid;
+  document.getElementById("mtitle").textContent =
+    `分支 #${mid} · ${modelDetail.model_type} · 窗 ${modelDetail.fit_start}-${modelDetail.fit_end}`;
+  renderDiag(); draw();
+}
+function renderDiag(){
+  const d = modelDetail.diagnostics, el = document.getElementById("diag");
+  let h = `<div><span class="tag">拟合点数</span>${d.fit_frame_count}
+    <span class="tag">排除事件帧</span>${d.excluded_event_frames.join(",")||"无"}</div>`;
+  h += d.exposure_invalid_frames.length
+    ? `<div><span class="tag bad">曝光无效(未做除法)</span>${d.exposure_invalid_frames.join(",")}</div>`
+    : `<div><span class="tag ok">曝光全部有效</span></div>`;
+  const na = d.noise_amplification;
+  if(na.affected_frames.length){
+    const ts = na.affected_frames.map(f=>f.t).join(",");
+    h += `<div><span class="tag bad">噪声放大</span>漂白因子低于上限 ${d.noise_cap}，
+      最大放大 ${na.max_amplification.toFixed(1)}×，受影响帧：${ts}</div>`;
+  } else {
+    h += `<div><span class="tag ok">漂白因子 ≥ 上限 ${d.noise_cap}，无噪声放大</span></div>`;
+  }
+  const s = modelDetail.stability;
+  h += `<div><span class="tag">外推稳定性</span>${s.relative_diff==null?(s.note||"n/a")
+    : "段尾外推相对差 "+(s.relative_diff*100).toFixed(2)+"%"}</div>`;
+  el.innerHTML = h;
+}
+function draw(){
+  const cv = document.getElementById("chart"), ctx = cv.getContext("2d");
+  ctx.clearRect(0,0,cv.width,cv.height);
+  if(!modelDetail){ ctx.fillStyle="#8fa0bd"; ctx.fillText("拟合或选择一个模型分支",20,30); return; }
+  const frames = modelDetail.frames, pad=42, W=cv.width-2*pad, H=cv.height-2*pad;
+  const series = LAYERS.filter(([k])=>visible[k]);
+  const pts = [];
+  for(const [k] of series) for(const f of frames){
+    const v = f[k]; if(v!=null && isFinite(v)) pts.push(v);
+  }
+  if(!pts.length) return;
+  let ymin=Math.min(...pts), ymax=Math.max(...pts);
+  if(ymax-ymin<1e-9){ ymax+=1; ymin-=1; }
+  const t0=frames[0].t, t1=frames[frames.length-1].t;
+  const X=t=>pad+(t-t0)/(t1-t0)*W, Y=v=>pad+H-(v-ymin)/(ymax-ymin)*H;
+  // 断点竖线
+  if(curDs) for(const b of curDs.breakpoints){
+    ctx.strokeStyle="#5b2a2a"; ctx.setLineDash([4,4]);
+    ctx.beginPath(); ctx.moveTo(X(b.t),pad); ctx.lineTo(X(b.t),pad+H); ctx.stroke();
+    ctx.setLineDash([]); ctx.fillStyle="#ef5350"; ctx.font="10px sans-serif";
+    ctx.fillText(b.type, X(b.t)+3, pad+10);
+  }
+  // 拟合窗
+  ctx.fillStyle="rgba(79,195,247,0.08)";
+  ctx.fillRect(X(modelDetail.fit_start),pad,X(modelDetail.fit_end)-X(modelDetail.fit_start),H);
+  // 曝光无效帧
+  for(const f of frames) if(!f.exposure_valid){
+    ctx.fillStyle="rgba(239,83,80,0.25)";
+    ctx.fillRect(X(f.t)-1.5,pad,3,H);
+  }
+  // 噪声放大帧
+  for(const f of frames) if(f.flags.includes("noise_amplification")){
+    ctx.fillStyle="rgba(255,183,77,0.35)";
+    ctx.fillRect(X(f.t)-1.5,pad,3,H);
+  }
+  // 坐标轴
+  ctx.strokeStyle="#2b3a55"; ctx.strokeRect(pad,pad,W,H);
+  ctx.fillStyle="#8fa0bd"; ctx.font="10px sans-serif";
+  ctx.fillText(ymax.toFixed(1),4,pad+8); ctx.fillText(ymin.toFixed(1),4,pad+H);
+  ctx.fillText("t="+t0,pad,pad+H+14); ctx.fillText("t="+t1,pad+W-24,pad+H+14);
+  // 各层折线（None 处断开，绝不偷拼）
+  for(const [k,label,color] of series){
+    ctx.strokeStyle=color; ctx.lineWidth = k==="corrected"?2:1.2; ctx.beginPath();
+    let pen=false;
+    for(const f of frames){
+      const v=f[k];
+      if(v==null||!isFinite(v)){ pen=false; continue; }
+      if(pen) ctx.lineTo(X(f.t),Y(v)); else ctx.moveTo(X(f.t),Y(v));
+      pen=true;
+    }
+    ctx.stroke();
+  }
+  ctx.lineWidth=1;
+}
+layerCheckboxes(); draw(); refresh();
+</script>
+</body>
+</html>
